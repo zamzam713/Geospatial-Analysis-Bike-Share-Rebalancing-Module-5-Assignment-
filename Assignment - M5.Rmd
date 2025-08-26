@@ -1,0 +1,710 @@
+---
+title: "Assignment - M5: Geospatial Analysis - Bike share R Notebook"
+author: "Jida Al Mulki,  Zamzam Atwi,  Fatima Moussawi, Hassan Nasser"
+output: html_document
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+# Introduction
+From Chapter 8 in [Public Policy Analytics: Code & Context for Public Policy in Government](https://urbanspatial.github.io/PublicPolicyAnalytics/): *One of the most difficult operational problems for urban bike share systems is the need to ‘re-balance’ bicycles across the network. Bike share is not useful if a dock has no bikes to pick up, nor if there are no open docking spaces to deposit a bike. Re-balancing is the practice of anticipating (or predicting) bike share demand for all docks at all times and manually redistributing bikes to ensure a bike or a docking place is available when needed*.
+
+# Loading Libraries
+```{r}
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(tigris)
+library(gganimate)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+```
+
+```{r}
+options(tigris_class = "sf")
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c")
+palette4 <- c("#D2FBD4","#92BCAB","#527D82","#123F5A")
+palette2 <- c("#6baed6","#08519c")
+```
+
+```{r}
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+ride <- read.csv(file.path(root.dir,"Chapter8/chicago_rideshare_trips_nov_dec_18_clean_sample.csv"))
+head(ride)
+```
+
+### Q3- Consider the dataset used in Chapter 8 from Public Policy Analytics: Code & Context for Public Policy in Government and posted here. What other feature(s) you might consider adding to this dataset, if you had the means and resources to do it? (10 pts)<br> Explain by referring to the predictive ability of other indicators that may have a positive effect on the accurate prediction of space/time demand for ride share. (10 pts)
+
+**Traffic congestion data**: incorporate data on traffic congestion levels such as the average vehicle speeds or congestion indices, as higher levels of congestion might lead to increased demand for ride share services
+
+**Public EVents**: Inlusion of data on public events such as sports, concerts, festivals and conferences can account for temporary surges in ride-share demand.
+
+**Public transit Accessibility**: EValuating the proximity and accessibility of public transit options such as subway stations, buses, and train stations can provide insights into transportation preferences which might affect the demand for ride-sharing.
+
+**Weather Conditions**: Fluctuations in temperature, precipitation, humidity, and wind speed can influence ride-share demand.
+
+###Engineer two additional features to account for weather effects and public holidays. (10 pts + 10 pts)
+
+```{r}
+# Data wrangling for ride dataset
+
+ride2 <-
+  ride %>% 
+  mutate(interval60 = floor_date(mdy_hms(Trip.Start.Timestamp), unit = "hour"),
+         interval15 = floor_date(mdy_hms(Trip.Start.Timestamp), unit = "15 mins"),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE),
+         Pickup.Census.Tract = as.character(Pickup.Census.Tract),
+         Dropoff.Census.Tract = as.character(Dropoff.Census.Tract)) %>%
+  filter(Pickup.Census.Tract != "17031980000" & Pickup.Census.Tract != "17031770602")
+
+head(ride2)
+```
+
+```{r}
+##Importing weather data and summarizing temperature, precipitation, and wind speed per hour
+
+library(riem)
+weather.Data <- 
+  riem_measures(station = "ORD", date_start = "2018-11-01", date_end = "2019-01-01")
+
+weather.Panel <-  
+  weather.Data %>%
+  mutate_if(is.character, list(~replace(as.character(.), is.na(.), "0"))) %>% 
+  replace(is.na(.), 0) %>%
+  mutate(interval60 = ymd_h(substr(valid, 1, 13))) %>%
+  mutate(week = week(interval60), dotw = wday(interval60, label=TRUE)) %>%
+  group_by(interval60) %>%
+  summarize(Temperature = max(tmpf), Precipitation = sum(p01i), Wind_Speed = max(sknt)) %>%
+  mutate(Temperature = ifelse(Temperature == 0, 42, Temperature))
+head(weather.Panel)
+```
+
+```{r}
+# Merge the weather panel with ride2 data based on the interval60
+
+ride2_weather <- merge(weather.Panel, ride2, by.x = "interval60", by.y = "interval60", all = TRUE)
+head(ride2_weather)
+```
+
+```{r}
+summary(ride2_weather$Precipitation)
+summary(ride2_weather$Wind_Speed)
+summary(ride2_weather$Temperature)
+```
+
+```{r}
+#Visualization of weather indicators using time-series
+
+grid.arrange(top = "Weather Data - Chicago - November & December, 2018",
+             ggplot(weather.Panel, aes(interval60,Precipitation)) + geom_line() + 
+               labs(title="Percipitation", x="Hour", y="Percipitation") + plotTheme(),
+             ggplot(weather.Panel, aes(interval60,Wind_Speed)) + geom_line() + 
+               labs(title="Wind Speed", x="Hour", y="Wind Speed") + plotTheme(),
+             ggplot(weather.Panel, aes(interval60,Temperature)) + geom_line() + 
+               labs(title="Temperature", x="Hour", y="Temperature") + plotTheme())
+```
+
+```{r}
+# Find the date with the lowest number of rides
+smallest_date <- min(ride2$Trip.Start.Timestamp)
+
+# Find the date with the highest number of rides
+largest_date <- max(ride2$Trip.Start.Timestamp)
+
+# Print the results
+print(smallest_date)
+print(largest_date)
+```
+
+```{r}
+# Scatterplot showing number of rides per precipitation >0.1
+
+precipHours <- weather.Panel %>%
+  filter(Precipitation > 0.1) %>%
+  mutate(precip = "Over0.1")
+
+# Adjust the ggplot code to include the filtered precipitation hours
+ggplot(ride2_weather %>%
+         group_by(interval60) %>% tally()) +
+  geom_line(aes(x = interval60, y = n), size = 0.5) +
+  geom_vline(data = precipHours, aes(xintercept = interval60), color = "blue", linetype = "dotted") +
+  labs(title = "Capital Bikeshare trips per hr. ORD station, NOV-JAN 2021",
+       x = "Date", 
+       y = "Number of trips",
+       subtitle = "Blue dotted lines indicate hours with more than 0.1 inches of precip.") +
+  plotTheme() 
+```
+
+```{r}
+## Scatterplot showing number of rides per wind speed >15
+
+# Filter wind hours
+windHours <- weather.Panel %>%
+  filter(Wind_Speed > 15) %>%
+  mutate(wind = "High")
+
+# Adjust the ggplot code to include the filtered wind hours
+ggplot(ride2_weather %>%
+         group_by(interval60) %>% tally()) +
+  geom_line(aes(x = interval60, y = n), size = 0.5) +
+  geom_vline(data = windHours, aes(xintercept = interval60), color = "green", linetype = "dotted") +
+  labs(title = "Capital Bikeshare trips per hr. ORD station, NOV-JAN 2021",
+       x = "Date", 
+       y = "Number of trips",
+       subtitle = "Green dotted lines indicate hours with high wind speed.") +
+  theme_minimal()
+```
+
+```{r}
+## Scatter plot showing number of rides per temperature <=20
+# Filter temperature hours based on the condition (Temperature <= 20)
+
+temperatureHours <- weather.Panel %>%
+  filter(Temperature <= 20) %>%
+  mutate(temperature = "Low")
+
+# Adjust the ggplot code to include the filtered temperature hours
+ggplot(ride2_weather %>%
+         group_by(interval60) %>% tally()) +
+  geom_line(aes(x = interval60, y = n), size = 0.5) +
+  geom_vline(data = temperatureHours, aes(xintercept = interval60), color = "blue", linetype = "dotted") +
+  labs(title = "Capital Bikeshare trips per hr. ORD station, NOV-JAN 2021",
+       x = "Date", 
+       y = "Number of trips",
+       subtitle = "Blue dotted lines indicate hours with temperature <= 25°F.") +
+  theme_minimal()
+```
+
+```{r}
+## Predicting bike share based on US holidays
+# Set the working directory
+setwd("C:/Users/Hassan Nasser/Desktop/AUB Course/Data Analytics for Public Policy/Assigment 2")
+# setwd("C:/Users/Dell/Desktop/Data analytics for public policy")
+
+# Read the US Bank holidays dataset
+holidays <- read.csv("US Holiday Dates.csv")
+
+# Display the first few rows of the dataset
+head(holidays)
+```
+
+```{r}
+# Extract only the date from the timestamp in ride2_merged
+ride2_weather$Date <- as.Date(ride2_weather$Trip.Start.Timestamp, format = "%m/%d/%Y %I:%M:%S %p")
+
+# Convert the Date column in ride2_merged to Date format
+ride2_weather$Date <- as.Date(ride2_weather$Date)
+
+# Convert the Date column in holidays to Date format
+holidays$Date <- as.Date(holidays$Date, format = "%m/%d/%Y")
+
+# Merge the datasets based on the Date column
+merged_data <- merge(ride2_weather, holidays, by = "Date", all = TRUE)
+
+# Display the first few rows of the merged dataset
+head(merged_data)
+```
+
+
+```{r}
+## Encoding of the Holiday variable into Holiday == 1 and No-Holiday == 0
+# Create a new column 'holiday_encoded' in the merged dataset
+merged_data <- merged_data %>%
+  mutate(holiday_encoded = ifelse(!is.na(Holiday), 1, 0))
+head(merged_data)
+```
+
+```{r}
+str(merged_data)
+```
+
+```{r}
+# Filter the merged data for November 11
+nov_11_data <- subset(merged_data, format(Date, "%m-%d") == "11-11")
+
+# View the filtered data
+head(nov_11_data)
+```
+
+```{r}
+#Converting the format of "Trip.Start.Timestamp" from character to datetime type 
+merged_data$Trip.Start.Timestamp <- as.POSIXct(merged_data$Trip.Start.Timestamp, format = "%m/%d/%Y %I:%M:%S %p")
+class(merged_data$Trip.Start.Timestamp)
+
+# Create a histogram for Trip.Start.Timestamp vs Holiday/No-Holiday
+histogram <- ggplot(merged_data, aes(x = Trip.Start.Timestamp, fill = factor(holiday_encoded))) +
+  geom_histogram(binwidth = 60*60, position = "identity", alpha = 0.7) +  # Set binwidth to 1 hour (3600 seconds)
+  scale_fill_manual(values = c("blue", "red"), labels = c("Non-Holiday", "Holiday")) +
+  labs(title = "Histogram of Trip Start Timestamp by Holiday Status",
+       x = "Trip Start Timestamp",
+       y = "Frequency") +
+  theme_minimal()
+
+# Display the histogram
+print(histogram)
+```
+
+```{r,results='hide'}
+# Subset a study area using neighborhoods
+chicagoTracts <- 
+  tigris::tracts(state = "Illinois", county = "Cook") %>%
+  dplyr::select(GEOID) %>% filter(GEOID != 17031990000)
+
+neighborhoodList <- 
+  c("Grant Park","Printers Row","Loop","Millenium Park","West Loop","United Center",
+    "West Town","East Village","Ukranian Village","Wicker Park","River North",
+    "Rush & Division","Streeterville","Gold Coast","Old Town","Bucktown","Lincoln Park",
+    "Sheffield & DePaul","Lake View","Boystown","Wrigleyville","North Center","Uptown", 
+    "Lincoln Square","Little Italy, UIC")
+
+nhoods <- 
+  st_read("https://data.cityofchicago.org/api/geospatial/bbvz-uum9?method=export&format=GeoJSON") %>%
+  st_transform(st_crs(chicagoTracts)) %>%
+  filter(pri_neigh %in% neighborhoodList)
+
+studyArea.tracts <-
+  st_intersection(chicagoTracts, st_union(nhoods))
+```
+
+```{r}
+##Map visualization of studyArea.tracts relative to chicagoTracts
+
+# Plot the chicagoTracts and studyArea.tracts maps
+ggplot() +
+  geom_sf(data = chicagoTracts, fill = "gray", color = "black") +
+  geom_sf(data = studyArea.tracts, fill = "blue", color = "black") +
+  labs(title = "Chicago Tracts and Study Area Map", 
+       caption = "Source: City of Chicago") +
+  theme_minimal()
+```
+
+```{r}
+#Create the final space/time panel
+ride.template <- 
+  filter(merged_data, week %in% c(45:52)) %>%
+  semi_join(st_drop_geometry(studyArea.tracts), 
+            by = c("Pickup.Census.Tract" = "GEOID"))
+
+length(unique(ride.template$interval60)) * length(unique(ride.template$Pickup.Census.Tract))
+
+study.panel <- 
+  expand.grid(interval60 = unique(ride.template$interval60), 
+              Pickup.Census.Tract = unique(ride.template$Pickup.Census.Tract)) 
+
+nrow(study.panel)  
+```
+
+```{r}
+#Merging space/time intervals from actual trips in ride.template with intervals that saw no trips in study.panel
+ride.panel <- 
+  ride.template %>%
+  mutate(Trip_Counter = 1) %>%
+  right_join(study.panel) %>% 
+  group_by(interval60, Pickup.Census.Tract) %>%
+  summarize(Trip_Count = sum(Trip_Counter, na.rm = TRUE),
+            holiday_encoded = first(holiday_encoded)) %>%  # Add holiday_encoded to summarize
+  na.omit() %>%
+  left_join(weather.Panel, by = "interval60") %>%
+  left_join(studyArea.tracts, by = c("Pickup.Census.Tract" = "GEOID")) %>%
+  mutate(week = week(interval60),
+         dotw = wday(interval60, label = TRUE)) %>%
+  st_sf()
+
+ride.panel
+```
+
+```{r}
+##Testing for temporal relationship by creating a new feature (lagged trip count)
+ride.panel <- 
+  ride.panel %>% 
+  arrange(Pickup.Census.Tract, interval60) %>% 
+  group_by(Pickup.Census.Tract) %>% 
+  mutate(lagHour = dplyr::lag(Trip_Count,1),
+         lag2Hours = dplyr::lag(Trip_Count,2),
+         lag3Hours = dplyr::lag(Trip_Count,3),
+         lag4Hours = dplyr::lag(Trip_Count,4),
+         lag12Hours = dplyr::lag(Trip_Count,12),
+         lag1day = dplyr::lag(Trip_Count,24)) %>% 
+  ungroup()
+
+as.data.frame(filter(
+ride.panel, Pickup.Census.Tract == "17031831900"))[1:6, c("interval60", "Pickup.Census.Tract", "Trip_Count", "lagHour", "lag2Hours")]
+```
+
+```{r}
+## Splitting Testing and Training data
+merged_data.Train <- filter(ride.panel, week < 50)
+merged_data.Test <- filter(ride.panel, week >= 50)
+```
+
+```{r}
+mondays <- 
+  mutate(ride.panel,
+         monday = ifelse(dotw == "Mon" & hour(interval60) == 1,
+                         interval60, 0)) %>%
+  filter(monday != 0) 
+
+tg   <- as.POSIXct("2018-11-22 01:00:00 UTC")
+xmas <- as.POSIXct("2018-12-24 01:00:00 UTC")
+
+st_drop_geometry(rbind(
+  mutate(merged_data.Train, Legend = "Training"), 
+  mutate(merged_data.Test, Legend = "Testing"))) %>%
+    group_by(Legend, interval60) %>% 
+      summarize(Trip_Count = sum(Trip_Count)) %>%
+      ungroup() %>% 
+      ggplot(aes(interval60, Trip_Count, colour = Legend)) + geom_line() +
+        scale_colour_manual(values = palette2) +
+        geom_vline(xintercept = tg, linetype = "dotted") +
+        geom_vline(xintercept = xmas, linetype = "dotted") +
+        geom_vline(data = mondays, aes(xintercept = monday)) +
+        labs(title="Rideshare trips by week: November-December",
+             subtitle="Dotted lines for Thanksgiving & Christmas", 
+             x="Day", y="Trip Count") +
+        plotTheme() + theme(panel.grid.major = element_blank())    
+```
+
+```{r}
+##Pearson correlation between each variable in correlation lag
+plotData.lag <-
+  filter(as.data.frame(ride.panel), week == 45) %>%
+  dplyr::select(starts_with("lag"), Trip_Count) %>%
+  gather(Variable, Value, -Trip_Count) %>%
+  mutate(Variable = fct_relevel(Variable, "lagHour","lag2Hours","lag3Hours",
+                                          "lag4Hours","lag12Hours","lag1day"))
+correlation.lag <-
+  group_by(plotData.lag, Variable) %>%
+    summarize(correlation = round(cor(Value, Trip_Count, use = "complete.obs"), 2)) 
+```
+
+```{r}
+# Plotting the correlation between lag variables and Trip_Count
+ggplot(correlation.lag, aes(x = Variable, y = correlation)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  labs(title = "Correlation between Lag Variables and Trip_Count",
+       x = "Lag Variables",
+       y = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+##Trip_Count spatial autocorrelation
+# Mapping Trip_Count sums by week and by day of the week
+group_by(ride.panel, week, Pickup.Census.Tract) %>%
+  summarize(Sum_Trip_Count = sum(Trip_Count)) %>%
+  ungroup() %>% 
+  ggplot() + geom_sf(aes(fill = q5(Sum_Trip_Count))) +
+  facet_wrap(~week, ncol = 8) +
+  scale_fill_manual(values = palette5,
+                    labels = c("16", "140", "304", "530", "958"),
+                    name = "Trip_Count") +
+  labs(title="Sum of rideshare trips by tract and week") +
+  mapTheme() + theme(legend.position = "bottom") 
+```
+
+```{r}
+##Space/time correlation?
+# Mapping of ride share trips over space and time for week 45
+week45 <- filter(merged_data, week == 45 & dotw == "Mon")
+
+week45.panel <- expand.grid(
+  interval15 = unique(week45$interval15),
+  Pickup.Census.Tract = unique(week45$Pickup.Census.Tract)
+)
+```
+
+```{r}
+#Creating map animation
+merged_data.animation.data <-
+  mutate(week45, Trip_Counter = 1) %>%
+  right_join(week45.panel) %>% 
+  group_by(interval15, Pickup.Census.Tract) %>%
+  summarize(Trip_Count = sum(Trip_Counter, na.rm=T)) %>% 
+  ungroup() %>% 
+  left_join(chicagoTracts, by=c("Pickup.Census.Tract" = "GEOID")) %>%
+  st_sf() %>%
+  mutate(Trips = case_when(Trip_Count == 0 ~ "0 trips",
+                           Trip_Count > 0 & Trip_Count <= 3 ~ "1-3 trips",
+                           Trip_Count > 3 & Trip_Count <= 6 ~ "4-6 trips",
+                           Trip_Count > 6 & Trip_Count <= 10 ~ "7-10 trips",
+                           Trip_Count > 10 ~ "10+ trips")) %>%
+  mutate(Trips  = fct_relevel(Trips, "0 trips","1-3 trips","4-6 trips",
+                              "7-10 trips","10+ trips"))
+```
+
+```{r}
+#Creating Interactive map animation
+rideshare_animation <-
+  ggplot() +
+  geom_sf(data = merged_data.animation.data, aes(fill = Trips)) +
+  scale_fill_manual(values = palette5) +
+  labs(title = "Rideshare pickups for one day in November 2018",
+       subtitle = "15 minute intervals: {current_frame}") +
+  transition_manual(interval15) +
+  mapTheme()
+```
+
+```{r}
+animate(rideshare_animation, duration=20, renderer = gifski_renderer())
+```
+
+```{r}
+anim_save("rideshare_local", rideshare_animation, duration=20, renderer = gifski_renderer())
+```
+
+```{r}
+##Does ridership vary with precipitation?
+#Bar plot for Weather precipitation
+st_drop_geometry(ride.panel) %>%
+  group_by(interval60) %>% 
+  summarize(Trip_Count = mean(Trip_Count),
+            Precipitation = first(Precipitation)) %>%
+  mutate(isPercip = ifelse(Precipitation > 0,"Rain/Snow", "None")) %>%
+  group_by(isPercip) %>%
+  summarize(Mean_Trip_Count = mean(Trip_Count)) %>%
+  ggplot(aes(isPercip, Mean_Trip_Count)) + geom_bar(stat = "identity") +
+  labs(title="Does ridership vary with precipitation?",
+       x="Precipitation", y="Mean Trip Count") +
+  plotTheme()
+```
+
+```{r}
+##visualizing mean trip count by temperature
+st_drop_geometry(ride.panel) %>%
+  group_by(interval60) %>% 
+  summarize(Trip_Count = mean(Trip_Count),
+            Temperature = first(Temperature)) %>%
+  mutate(week = week(interval60)) %>%
+  ggplot(aes(Temperature, Trip_Count)) + 
+  geom_point() + geom_smooth(method = "lm", se= FALSE) +
+  facet_wrap(~week, ncol=8) + 
+  labs(title="Trip Count as a function of Temperature by week",
+       x="Temperature", y="Mean Trip Count") +
+  plotTheme()
+```
+
+```{r}
+# Bar plot for Holiday
+st_drop_geometry(ride.panel) %>%
+  group_by(interval60) %>% 
+  summarize(Trip_Count = mean(Trip_Count),
+            holiday_encoded = first(holiday_encoded)) %>%
+  mutate(Holiday = ifelse(holiday_encoded == 1, "Holiday", "Non-Holiday")) %>%
+  group_by(Holiday) %>%
+  summarize(Mean_Trip_Count = mean(Trip_Count)) %>%
+  na.omit() %>%
+  ggplot(aes(x = Holiday, y = Mean_Trip_Count)) + 
+  geom_bar(stat = "identity") +
+  labs(title = "Does ridership vary with holidays?",
+       x = "Holiday", y = "Mean Trip Count") +
+  plotTheme()
+```
+
+```{r}
+##Estimate a ride share forecast using Regression models (OLS)
+reg1 <- lm(Trip_Count ~  hour(interval60) + dotw + Temperature, data=merged_data.Train)
+summary(reg1)
+```
+
+```{r}
+reg2 <- lm(Trip_Count ~  Pickup.Census.Tract + dotw + Temperature, data=merged_data.Train)
+summary(reg2)
+```
+
+```{r}
+reg3 <- lm(Trip_Count ~  Pickup.Census.Tract + hour(interval60) + dotw + Temperature, 
+           data=merged_data.Train)
+summary(reg3)
+```
+
+```{r}
+reg4 <- lm(formula = Trip_Count ~ Pickup.Census.Tract + hour(interval60) + 
+    dotw + Temperature + lagHour + lag2Hours + lag3Hours + lag12Hours + 
+    lag1day, data = merged_data.Train)
+
+# Set max.print option
+options(max.print = 1000)
+
+summary(reg4)
+```
+
+```{r}
+reg5 <- lm(formula = Trip_Count ~ Pickup.Census.Tract + hour(interval60) + 
+              dotw + Temperature + lagHour + lag2Hours + lag3Hours + lag12Hours + 
+              lag1day + factor(holiday_encoded), data = merged_data.Train)
+
+
+# Set max.print option
+options(max.print = 1000)
+
+summary(reg5)
+```
+
+```{r}
+# Extract the estimate, std error, t value, and p-value of holiday_encoded
+holiday_est <- summary(reg5)$coefficients["factor(holiday_encoded)1", "Estimate"]
+holiday_std_error <- summary(reg5)$coefficients["factor(holiday_encoded)1", "Std. Error"]
+holiday_t_value <- summary(reg5)$coefficients["factor(holiday_encoded)1", "t value"]
+holiday_p_value <- summary(reg5)$coefficients["factor(holiday_encoded)1", "Pr(>|t|)"]
+
+# Print the results
+cat("Estimate:", holiday_est, "\n")
+cat("Standard Error:", holiday_std_error, "\n")
+cat("t value:", holiday_t_value, "\n")
+cat("P-value:", holiday_p_value, "\n")
+```
+
+```{r}
+#Validate test set by time
+merged_data.Test.weekNest <- 
+  as.data.frame(merged_data.Test) %>%
+  nest(-week) 
+
+merged_data.Test.weekNest
+```
+
+```{r}
+##Predict for each week in merged_data.Trest.weekNest
+model_pred <- function(dat, fit){
+  pred <- predict(fit, newdata = dat)}
+```
+
+```{r}
+## week_predictions are calculated for each week in ride.Test
+week_predictions <- 
+  merged_data.Test.weekNest %>% 
+  mutate(A_Time_FE = map(data, ~ model_pred(.x, fit = reg1)),
+         B_Space_FE = map(data, ~ model_pred(.x, fit = reg2)),
+         C_Space_Time_FE = map(data, ~ model_pred(.x, fit = reg3)),
+         D_Space_Time_Lags = map(data, ~ model_pred(.x, fit = reg4)),
+         E_Space_Time_Lags_holiday = map(data, ~ model_pred(.x, fit = reg5)))
+
+week_predictions
+```
+
+```{r}
+## Calculating MAE and Standard Deviation
+week_predictions <- week_predictions %>%  
+  gather(Regression, Prediction, -data, -week) %>% 
+  mutate(Observed = map(data, pull, Trip_Count),
+         Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+         MAE = map_dbl(Absolute_Error, mean),
+         sd_AE = map_dbl(Absolute_Error, sd))
+```
+
+```{r}
+#Plotting MAE by model by week
+week_predictions %>%
+  dplyr::select(week, Regression, MAE) %>%
+  gather(Variable, MAE, -Regression, -week) %>%
+  ggplot(aes(week, MAE)) + 
+  geom_bar(aes(fill = Regression), position = "dodge", stat="identity") +
+  scale_fill_manual(values = palette5) +
+  labs(title = "Mean Absolute Errors by model specification and week") +
+  plotTheme()
+```
+
+```{r}
+## Time-series plot for predicted and observed ride share by hourly interval
+week_predictions %>% 
+  mutate(interval60 = map(data, pull, interval60),
+         Pickup.Census.Tract = map(data, pull, Pickup.Census.Tract)) %>%
+  dplyr::select(interval60, Pickup.Census.Tract, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  gather(Variable, Value, -Regression, -interval60, -Pickup.Census.Tract) %>%
+  group_by(Regression, Variable, interval60) %>%
+  summarize(Value = mean(Value)) %>%
+  ggplot(aes(interval60, Value, colour=Variable)) + geom_line(size = 1.1) + 
+  facet_wrap(~Regression, ncol=1) +
+  scale_colour_manual(values = palette2) +
+  labs(title = "Mean Predicted/Observed ride share by hourly interval", 
+       x = "Hour", y= "Rideshare Trips") +
+  plotTheme()
+```
+
+```{r}
+##Validate test set by space
+error.byWeek <-
+  filter(week_predictions, Regression == "D_Space_Time_Lags") %>% 
+  unnest(cols = c(data, Prediction, Observed, Absolute_Error)) %>% st_sf() %>%
+  dplyr::select(Pickup.Census.Tract, Absolute_Error, week, geometry) %>%
+  gather(Variable, Value, -Pickup.Census.Tract, -week, -geometry) %>%
+  group_by(Variable, Pickup.Census.Tract, week) %>%
+  summarize(MAE = mean(Value))
+```
+
+
+```{r}
+# Plotting mean absolute error by tract and week, categorized by number of trips
+# Create a factor column with the categorized MAE for the plot
+error.byWeek$MAE_category <- cut(
+  error.byWeek$MAE,
+  breaks = c(-Inf, 1, 2, Inf),  # Set breaks based on the MAE distribution
+  labels = c("< 1 trip", "1-2 trips", "2+ trips")
+)
+
+# Plot
+ggplot(data = error.byWeek) +
+  geom_sf(aes(fill = MAE_category, geometry = geometry)) +
+  facet_wrap(~week, ncol = 3) +
+  scale_fill_manual(
+    values = palette5,
+    labels = c("< 1 trip", "1-2 trips", "2+ trips"),
+    name = "MAE"
+  ) +
+  labs(title = "Mean Absolute Error by tract by week") +
+  mapTheme() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+## Mapping MAE by hour for week 50
+error.byHour <-
+  filter(week_predictions, Regression == "D_Space_Time_Lags") %>% 
+  unnest(cols = c(data, Prediction, Observed, Absolute_Error)) %>% 
+  st_sf() %>%
+  dplyr::select(Pickup.Census.Tract, Absolute_Error, geometry, interval60) %>%
+  gather(Variable, Value, -interval60, -Pickup.Census.Tract, -geometry) %>%
+  filter(wday(interval60, label = TRUE) == "Mon" & week(interval60) == 50) %>%
+  group_by(hour = hour(interval60), Pickup.Census.Tract) %>%
+  summarize(MAE = mean(Value)) 
+```
+
+```{r}
+# Plotting mean absolute error by hour and tract
+# Create a factor column with the categorized MAE for the plot
+error.byHour$MAE_category <- cut(
+  error.byHour$MAE,
+  breaks = c(-Inf, 1, 2, Inf),  # Set breaks based on the MAE distribution
+  labels = c("< 1 trip", "1-2 trips", "2+ trips")
+)
+
+# Adjust the plotting code
+ggplot(data = error.byHour) +
+  geom_sf(aes(fill = MAE_category, geometry = geometry)) + 
+  facet_wrap(~hour, ncol = 6) +  # Arrange by hour
+  scale_fill_manual(
+    values = palette5,
+    labels = c("< 1 trip", "1-2 trips", "2+ trips"),
+    name = "MAE"
+  ) +
+    labs(
+    title = "Mean absolute trip count error by tract and hour",
+    subtitle = "For the Monday of Week 50"
+  ) +
+  mapTheme(base_size = 48,title_size = 16) +
+  theme(legend.position = "bottom")
+```
